@@ -35,10 +35,10 @@ int I_MAX=0;
 int I_MIN=0;
 long angle_mesure;
 boolean etat_moteur;
-#define pin_moteur_relais1 9
-#define pin_moteur_relais2 10
-#define pin_moteur_inversion1 11
-#define pin_moteur_inversion2 12
+#define pin_moteur_relais1 10
+//#define pin_moteur_relais2 10
+#define pin_moteur_inversion1 9
+//#define pin_moteur_inversion2 12
 
 bool SensRotation = true;
 
@@ -50,22 +50,23 @@ bool SensRotation = true;
 
 //int angle_declenchement = 20;
 boolean etat_courant;
-// periode d'échantillonnage en ms
+// periode d'ï¿½chantillonnage en ms
 #define MS_PERIOD_ECH  2
 
 // temps de moyennage du courant
-#define MS_MOYENNE    70
+#define MS_MOYENNE    140
 //#define MS_BROSSAGE 1000000 // en microseconde pour test
 //int MS_BROSSAGE = 120000000; //en microseconde
-#define MS_SURCOURANT 3000000 //en microseconde
+#define MS_SURCOURANT 15000000 //en microseconde
 #define MS_DEMARRAGE_MOTEUR 1500000 //en microseconde
+#define MS_ARRET 3000000 //en microseconde
 
 int i = 0;
 #define TAILLE_TABLEAU_ECHANTILLONS   (MS_MOYENNE / MS_PERIOD_ECH)
 //int echantillon_angle[TAILLE_TABLEAU_ECHANTILLONS] = { 0 };
 //
 //int indexEchantillonsCourant = 0;
-int tension = 0;
+float tension = 0;
 //int courant_max = 1300;
 enum Etats
 {
@@ -73,6 +74,7 @@ enum Etats
 	Demarrage,
 	Brossage,
 	Arret,
+	Surcourant,
 };
 
 int buttonpin = 4;
@@ -93,7 +95,7 @@ Etats etat = Attentedemarrage; //0=attente demarrge , 1= demarrage, 2=moteur tou
 #define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-/** Le nombre magique et le numéro de version actuelle */
+/** Le nombre magique et le numï¿½ro de version actuelle */
 static const unsigned long STRUCT_MAGIC = 123456789;
 static const byte STRUCT_VERSION = 2;
 
@@ -103,41 +105,66 @@ struct SavedDatasStruct
 	byte struct_version;
 	unsigned int temps_total_brossage;
 	int angle_declenchement;
-	int courant_max;
+	float courant_max;
 	unsigned long MS_BROSSAGE;
 };
-struct SerialExchangeData
-{
-	byte type;
-	unsigned int temps_total_brossage;
-	int angle_declenchement;
-	int courant_max;
-	unsigned long MS_BROSSAGE;
-	unsigned int angle_mesure;
-	int courant;
-};
+//struct SerialExchangeData
+//{
+//	byte type;
+//	unsigned int temps_total_brossage;
+//	int angle_declenchement;
+//	int courant_max;
+//	unsigned long MS_BROSSAGE;
+//	unsigned int angle_mesure;
+//	int courant;
+//};
 
 SavedDatasStruct SavedDatas;
-SerialExchangeData ExchangedDatas;
+//SerialExchangeData ExchangedDatas;
 int indexechantilon = 0;
 uint8_t echantillon_angle[TAILLE_TABLEAU_ECHANTILLONS] = { 0 };
 
 float gravity = 9.81f;
 
+float mVperAmpValue = 100;                  // If using ACS712 current module : for 5A module key in 185, for 20A module key in 100, for 30A module key in 66
+											// If using "Hall-Effect" Current Transformer, key in value using this formula: mVperAmp = maximum voltage range (in milli volt) / current rating of CT
+											// For example, a 20A Hall-Effect Current Transformer rated at 20A, 2.5V +/- 0.625V, mVperAmp will be 625 mV / 20A = 31.25mV/A 
+float offsetSampleRead = 0;                 /* to read the value of a sample for offset purpose later */
+float currentSampleRead = 0;               /* to read the value of a sample including currentOffset1 value*/
+float currentLastSample = 0;               /* to count time for each sample. Technically 1 milli second 1 sample is taken */
+float currentSampleSum = 0;               /* accumulation of sample readings */
+int currentSampleCount = 0;               /* to count number of sample. */
+float currentMean;                         /* to calculate the average value from all samples, in analog values*/
+float RMSCurrentMean;                      /* square roof of currentMean, in analog values */
+float adjustRMSCurrentMean;                /* RMScurrentMean including currenOffset2, in analog values */
+float FinalRMSCurrent;                     /* the final RMS current reading*/
+
+
+	/*1.1 Offset AC Current */
+
+float currentOffset1 = 0;                   // to Offset deviation and accuracy. Offset any fake current when no current operates. 
+											// Offset will automatically callibrate when SELECT Button on the LCD Display Shield is pressed.
+											// If you do not have LCD Display Shield, look into serial monitor to add or minus the value manually and key in here.
+											// 26 means add 26 to all analog value measured
+float currentOffset2 = 0;                   // to offset value due to calculation error from squared and square root.
+
+
+
 void setup()
 {
-	Serial.begin(74880);
+	//Serial.begin(74880);
 
 	wdt_disable();
 	wdt_enable(WDTO_8S);
 	pinMode(pin_moteur_relais1, OUTPUT);
-	pinMode(pin_moteur_relais2, OUTPUT);
+	//pinMode(pin_moteur_relais2, OUTPUT);
 	pinMode(buttonpin, INPUT_PULLUP);
 	pinMode(pinaAdjustValueX, INPUT);
 	pinMode(pinaAdjustValueY, INPUT);
 	pinMode(pinCourant, INPUT);
+	pinMode(pin_moteur_inversion1,OUTPUT);
 	digitalWrite(pin_moteur_relais1, HIGH);
-	digitalWrite(pin_moteur_relais2, HIGH);
+	//digitalWrite(pin_moteur_relais2, HIGH);
 	analogReference(DEFAULT);
 
 	// SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
@@ -152,15 +179,17 @@ void setup()
 	display.setTextSize(1);
 	display.cp437(true);
 
+	SensRotation=false;
 
 	t_debut_etat = micros();
 	etat_moteur = 0;
 	Wire.begin();                                                        //Start I2C as master
 	setup_mpu_6050_registers();                                          //Setup the registers of the MPU-6050 
 
-	Serial.begin(74880);
+	//Serial.begin(74880);
 	loop_timer = micros();                                               //Reset the loop timer
 	vue_affichage = 5;
+	currentLastSample = loop_timer;
 }
 
 void loop()
@@ -177,6 +206,7 @@ void loop()
 			if (val < -500) raz = false;
 			display.setCursor(0, 16);
 			display.print(raz ? "Oui" : "Non");
+			//display.print(val);
 			display.display();
 			delay(5);
 			wdt_reset();
@@ -189,8 +219,8 @@ void loop()
 			}
 		}
 		chargeEEPROM();
-		loop_timer = millis();
-		while (digitalRead(buttonpin) && loop_timer + 30000000l > micros())
+		loop_timer = micros();
+		while ( loop_timer + 3000000l > micros())
 		{
 			display.clearDisplay();
 			display.setCursor(0, 0);
@@ -227,11 +257,13 @@ void loop()
 	switch (etat)
 	{
 		case 0:
+			echantillonnagecourant();
 		if (angle_mesure >= SavedDatas.angle_declenchement)
 		{
 			etat = Demarrage;
 			t_debut_etat = micros();
 			issetting = 0;
+			
 		}
 		break;
 		case 1:
@@ -251,8 +283,8 @@ void loop()
 			echantillonnagecourant();
 			if (tension > SavedDatas.courant_max || ((duree_etat > SavedDatas.MS_BROSSAGE) && angle_mesure < SavedDatas.angle_declenchement))
 			{
+				etat = (tension> SavedDatas.courant_max) ? Surcourant:Arret;
 				MoteursOff();
-				etat =Arret;
 				t_debut_etat = micros();
 				ajout_temps_brossage();
 			}
@@ -262,11 +294,16 @@ void loop()
 			}
 			break;
 		case 3:
-			if (duree_etat > MS_SURCOURANT) { 
+			if (duree_etat > MS_ARRET) { 
 				etat = Attentedemarrage;
 				vue_affichage = 5;
 			}
 			break;
+		case 4:
+			if (duree_etat > MS_SURCOURANT) {
+				etat = Attentedemarrage;
+				vue_affichage = 5;
+			}
 	default:
 		break;
 	}
@@ -282,48 +319,22 @@ void loop()
 	}
 	prevbuttonstate = buttonstate;
 	gestion_affichage(map(analogRead(pinaAdjustValueY), 0, 1023, -1000, 1000));
-	while (abs(micros() - loop_timer) < 4000);                                //Wait until the loop_timer reaches 4000us (250Hz) before starting the next loop
+	//while (abs(micros() - loop_timer) < 1000);                                //Wait until the loop_timer reaches 4000us (250Hz) before starting the next loop
 	if (abs(duree_etat / 1000000) > 600) t_debut_etat = micros();
 	loop_timer = micros();//Reset the loop timer
 	//HandleSerial();
 	wdt_reset();
-}
-void HandleSerial()
-{
-	if (Serial.available() > sizeof(ExchangedDatas))
-	{
-
-		Serial.readBytes((byte*)&ExchangedDatas, sizeof(ExchangedDatas));
-		if (ExchangedDatas.type == 'G')
-		{
-			ExchangedDatas.angle_declenchement = SavedDatas.angle_declenchement;
-			ExchangedDatas.courant_max = SavedDatas.courant_max;
-			ExchangedDatas.MS_BROSSAGE = SavedDatas.MS_BROSSAGE;
-			ExchangedDatas.temps_total_brossage = SavedDatas.temps_total_brossage;
-			ExchangedDatas.angle_mesure = angle_mesure;
-			ExchangedDatas.courant = tension;
-			Serial.write((byte*)&ExchangedDatas, sizeof(ExchangedDatas));
-		}
-		else if (ExchangedDatas.type == 'P')
-		{
-			SavedDatas.angle_declenchement = ExchangedDatas.angle_declenchement;
-			SavedDatas.courant_max = ExchangedDatas.courant_max;
-			SavedDatas.MS_BROSSAGE = ExchangedDatas.MS_BROSSAGE;
-			sauvegardeEEPROM();
-		}
-	}
 }
 
 void MoteursOff()
 {
 	t_debut_etat = micros();
 	digitalWrite(pin_moteur_relais1, HIGH);
-	delayMicroseconds(40000);
-	digitalWrite(pin_moteur_relais2, HIGH);
+
 
 	etat_moteur = 0;
-	//echantillon_angle[TAILLE_TABLEAU_ECHANTILLONS] = { 0 };
-	tension = 0;
+
+	
 }
 void MoteursOn()
 {
@@ -332,28 +343,36 @@ void MoteursOn()
 	vue_affichage = 6;
 	etat_moteur = 1;
 	digitalWrite(pin_moteur_relais1, LOW);
-	delayMicroseconds(40000);
-	digitalWrite(pin_moteur_relais2, LOW);
+
 }
 void InversionSensRotation()
 {
 	SensRotation = !SensRotation;
 	digitalWrite(pin_moteur_inversion1, SensRotation);
-	delay(2);
-	digitalWrite(pin_moteur_inversion2, SensRotation);
 }
 void echantillonnagecourant()
 {
-	int mesure = map(analogRead(pinCourant), 0, 1023, 0, 5000);
-	if (mesure > I_MAX||temps_I_MAX+micros()>20000) {
-			I_MAX = mesure;
-		temps_I_MAX = micros();
+
+		offsetSampleRead = analogRead(pinCourant) - 512;                                          /* Read analog value. This is for offset purpose */
+		currentSampleRead = analogRead(pinCourant) - 512 + currentOffset1;                        /* read the sample value including offset value*/
+		currentSampleSum = currentSampleSum + sq(currentSampleRead);                                      /* accumulate total analog values for each sample readings*/
+
+		currentSampleCount += 1;
+		//tension += 0.01;/* to count and move on to the next following count */
+																										   /* to reset the time again so that next cycle can start again*/
+
+
+	if (currentSampleCount >= 50)                                                                        /* after 1000 count or 1000 milli seconds (1 second), do this following codes*/
+	{
+		currentMean = currentSampleSum / currentSampleCount;                                                /* average accumulated analog values*/
+		RMSCurrentMean = sqrt(currentMean);                                                               /* square root of the average value*/
+		adjustRMSCurrentMean = RMSCurrentMean + currentOffset2;                                           /* square root of the average value including offset value */
+		FinalRMSCurrent = (((adjustRMSCurrentMean / 1024) * 5000) / mVperAmpValue);                          /* calculate the final RMS current*/
+		tension = FinalRMSCurrent;
+		currentSampleSum = 0;                                                                              /* to reset accumulate sample values for the next cycle */
+		currentSampleCount = 0;                                                                             /* to reset number of sample for the next cycle */
 	}
-	else if (mesure < I_MIN || temps_I_MIN + micros()>20000) {
-		I_MIN = mesure;
-		temps_I_MIN = micros();
-	}
-	tension = (I_MAX - I_MIN) / 2;
+	//tension = (I_MAX + I_MIN) / 2;
 	//echantillon_angle[indexEchantillonsCourant] = map(analogRead(pinCourant), 0, 1023, 0, 5000);
 	//for (i = 0; i < TAILLE_TABLEAU_ECHANTILLONS; i++)
 	//{
@@ -433,9 +452,9 @@ void gestion_affichage(long analogvalue)
 		Affichage("Angle declenchement", String(SavedDatas.angle_declenchement), 248);
 		break;
 	case 1:
-		SavedDatas.courant_max = SavedDatas.courant_max + analogvalue / 200;
-		SavedDatas.courant_max = constrain(SavedDatas.courant_max, 0, 5000);
-		Affichage("Courant de coupure ", String(SavedDatas.courant_max), 0);
+		SavedDatas.courant_max = SavedDatas.courant_max + analogvalue / 80000.;
+		SavedDatas.courant_max = constrain(SavedDatas.courant_max, 0, 10.);
+		Affichage("Courant coupure (A)", String(SavedDatas.courant_max), 0);
 		break;
 	case 2:
 		SavedDatas.MS_BROSSAGE = SavedDatas.MS_BROSSAGE + analogvalue * 1000;
@@ -452,7 +471,7 @@ void gestion_affichage(long analogvalue)
 		Affichage("Angle mesure:" + String(angle_mesure), "Angle declenchement : " + String(SavedDatas.angle_declenchement), 248);
 		break;
 	case 6:
-		Affichage("Courant mesure : " + String(tension),"Restant brossage:"+String((SavedDatas.MS_BROSSAGE-duree_etat)/1000000) + "s", 0);
+		Affichage("I mesure (A): " + String(tension),"Restant brossage:"+String((SavedDatas.MS_BROSSAGE-duree_etat)/1000000) + "s", 0);
 		break;
 	case 7:
 		Affichage("Fin reglage, donneees sauvegardees", "Re-clique pour regler", 0);
@@ -490,33 +509,34 @@ void chargeEEPROM() {
 
 	EEPROM.get(0, SavedDatas);
 
-	// Détection d'une mémoire non initialisée
+	// Dï¿½tection d'une mï¿½moire non initialisï¿½e
 	byte erreur = SavedDatas.magic != STRUCT_MAGIC;
 
-	// Valeurs par défaut struct_version == 0
+	// Valeurs par dï¿½faut struct_version == 0
 	if (erreur) {
 
-		// Valeurs par défaut pour les variables de la version 0
+		// Valeurs par dï¿½faut pour les variables de la version 0
 		SavedDatas.MS_BROSSAGE = (unsigned long)120000000;
-		SavedDatas.courant_max = 1300;
+		SavedDatas.courant_max = 2.;
 		SavedDatas.angle_declenchement = 20;
 		SavedDatas.temps_total_brossage = 0;
+
 	}
 
-	// Valeurs par défaut struct_version == 1
+	// Valeurs par dï¿½faut struct_version == 1
 	//if (SavedDatas.struct_version < 1 || erreur) {
 
-	//	// Valeurs par défaut pour les variables de la version 1
+	//	// Valeurs par dï¿½faut pour les variables de la version 1
 	//	SavedDatas.valeur_2 = 13.37;
 	//}
 
-	//// Valeurs par défaut pour struct_version == 2
+	//// Valeurs par dï¿½faut pour struct_version == 2
 	//if (SavedDatas.struct_version < 2 || erreur) {
 
-	//	// Valeurs par défaut pour les variables de la version 2
+	//	// Valeurs par dï¿½faut pour les variables de la version 2
 	//	strcpy(SavedDatas.valeur_3, "Hello World!");
 	//}
 
-	// Sauvegarde les nouvelles données
+	// Sauvegarde les nouvelles donnï¿½es
 	sauvegardeEEPROM();
 }
