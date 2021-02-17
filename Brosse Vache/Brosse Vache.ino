@@ -124,7 +124,7 @@ SavedDatasStruct SavedDatas;
 int indexechantilon = 0;
 uint8_t echantillon_angle[TAILLE_TABLEAU_ECHANTILLONS] = { 0 };
 
-float gravity = 9.81f;
+long gravity = 0;
 
 float mVperAmpValue = 100;                  // If using ACS712 current module : for 5A module key in 185, for 20A module key in 100, for 30A module key in 66
 											// If using "Hall-Effect" Current Transformer, key in value using this formula: mVperAmp = maximum voltage range (in milli volt) / current rating of CT
@@ -249,8 +249,11 @@ void loop()
 
 
 	read_mpu_6050_data();
+	
+	double ratio = (acc_z/gravity);
+	ratio = constrain(ratio,-1,1);
 
-	angle_brut = acos((float)acc_z / gravity) * 57.296;       //Calculate the pitch angle
+	angle_brut = acos(ratio) * 57.296;       //Calculate the pitch angle
 
 	Echantillonnageangle();
 	duree_etat = abs(micros() - t_debut_etat);
